@@ -5,8 +5,8 @@ import re
 import time
 import feedparser
 import subprocess
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+import calendar
+import base64
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -24,50 +24,93 @@ SUBREDDITS = [
     "KeralaBuySell", "Kerala_buysell", "Kerala", "Kochi", "Trivandrum", "KochiClassifieds"
 ]
 
-DUBIZZLE_URLS = [
-    "https://dubai.dubizzle.com/en/free-stuff/"
-]
-
 SEEN_POSTS_FILE = "seen_posts.json"
 
-# Stage 1 Keywords
-POSITIVE_KEYWORDS = [r"free", r"giveaway", r"moving", r"urgent", r"leaving", r"must go", r"wts", r"clearance", r"sale", r"cheap"]
-NEGATIVE_KEYWORDS = [r"\[wtb\]", r"looking for", r"buying", r"wanted"]
+# Stage 1 Keywords (Enhanced Regex with Word Boundaries)
+POSITIVE_KEYWORDS = [
+    r"\bfree\b", r"\bgiveaway\b", r"\bmoving\b", r"\burgent\b", r"\bleaving\b", 
+    r"must go", r"\[wts\]", r"\bwts\b", r"\bclearance\b", r"\bsale\b", r"\bcheap\b", 
+    r"for sale", r"selling", r"price drop", r"discount", r"take it"
+]
 
-def git_pull_memory():
-    """Pulls the latest seen_posts.json from GitHub before starting."""
+NEGATIVE_KEYWORDS = [
+    r"\[wtb\]", r"\bwtb\b", r"looking for", r"\bbuying\b", r"\bwanted\b", 
+    r"in search of", r"\biso\b", r"where can i", r"where to buy", 
+    r"anybody selling", r"anyone selling", r"anyone have", r"anyone has", 
+    r"recommendation", r"looking to buy", r"want to buy", 
+    r"\bneed a\b", r"\bneed an\b", r"\bneed some\b", r"\bneed to buy\b"
+]
+
+GITHUB_FILE_SHA = None
+
+def api_pull_memory():
+    """Pulls the latest seen_posts.json directly from GitHub API."""
+    global GITHUB_FILE_SHA
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("GitHub credentials missing. Skipping Git Pull.")
+        print("GitHub credentials missing. Skipping API Pull.")
         return
+        
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{SEEN_POSTS_FILE}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
     try:
-        print("Pulling latest memory from Git...")
-        subprocess.run(["git", "pull", "origin", "main"], check=False)
+        print("Pulling latest memory from GitHub API...")
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            GITHUB_FILE_SHA = data['sha']
+            content = base64.b64decode(data['content']).decode('utf-8')
+            with open(SEEN_POSTS_FILE, 'w') as f:
+                f.write(content)
+            print("Successfully downloaded memory from GitHub.")
+        elif response.status_code == 404:
+            print("Memory file not found on GitHub. A new one will be created.")
+        else:
+            print(f"GitHub API Error: {response.status_code} - {response.text}")
     except Exception as e:
-        print(f"Git pull failed: {e}")
+        print(f"API Pull failed: {e}")
 
-def git_push_memory():
-    """Commits and pushes seen_posts.json back to GitHub before exiting."""
+def api_push_memory():
+    """Pushes seen_posts.json directly to GitHub API."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("GitHub credentials missing. Skipping Git Push.")
+        print("GitHub credentials missing. Skipping API Push.")
         return
+        
+    if not os.path.exists(SEEN_POSTS_FILE):
+        print("No memory file to push.")
+        return
+        
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{SEEN_POSTS_FILE}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
     try:
-        print("Committing and pushing memory to Git...")
-        subprocess.run(["git", "config", "--global", "user.email", "bot@dealfinder.com"], check=False)
-        subprocess.run(["git", "config", "--global", "user.name", "DealFinder Bot"], check=False)
+        print("Pushing memory to GitHub API...")
+        with open(SEEN_POSTS_FILE, 'r') as f:
+            content = f.read()
+            
+        encoded_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
         
-        subprocess.run(["git", "add", "SEEN_POSTS_FILE"], check=False)
-        subprocess.run(["git", "add", "seen_posts.json"], check=False)
+        payload = {
+            "message": "Auto-update memory [skip ci]",
+            "content": encoded_content
+        }
         
-        result = subprocess.run(["git", "commit", "-m", "Auto-update memory [skip ci]"], check=False)
+        if GITHUB_FILE_SHA:
+            payload["sha"] = GITHUB_FILE_SHA
+            
+        response = requests.put(url, headers=headers, json=payload)
         
-        if result.returncode == 0:
-            remote_url = f"https://x-access-token:{GITHUB_TOKEN}@github.com/{GITHUB_REPO}.git"
-            subprocess.run(["git", "push", remote_url, "HEAD:main"], check=False)
+        if response.status_code in [200, 201]:
             print("Successfully pushed memory to GitHub.")
         else:
-            print("No new memory to commit.")
+            print(f"GitHub API Error: {response.status_code} - {response.text}")
     except Exception as e:
-        print(f"Git push failed: {e}")
+        print(f"API Push failed: {e}")
 
 def load_seen_posts():
     if os.path.exists(SEEN_POSTS_FILE):
@@ -120,14 +163,19 @@ You are an expert classifieds deal appraiser. I will give you a post from {sourc
 You must strictly return a JSON object (no markdown formatting, just raw JSON) analyzing the deal.
 Do NOT wrap the response in ```json ``` blocks. Just return the raw JSON object.
 
+CRITICAL RULE 1: You are looking for HIGH-VALUE DEALS. This includes physical items (furniture, electronics, cars) AND premium digital services/software that are normally paid but are currently heavily discounted or free. You must STRONGLY REJECT self-promotion, people advertising their own basic free apps/projects, job postings, advice, or news.
+CRITICAL RULE 2: You must COMPLETELY REJECT any post where the user is looking to BUY or ACQUIRE an item (e.g., "needed", "wanted", "looking for", "WTB"). You are ONLY looking for people SELLING or GIVING AWAY items.
+
 Post Title: {title}
 Post Body: {selftext}
 
 Output Schema Required:
 {{
-  "item_category": "electronics | furniture | vehicles | household | other",
+  "is_buy_request": boolean,
+  "is_valuable_deal": boolean,
+  "item_category": "electronics | furniture | vehicles | household | digital_premium | self_promotion | other",
   "is_absolutely_free": boolean,
-  "seller_motivation_level": "desperate | high | neutral | commercial_dealer",
+  "seller_motivation_level": "desperate | high | neutral | commercial_dealer | self_promoter",
   "price_stated": "number or null",
   "currency": "string or null",
   "is_negotiable": boolean,
@@ -136,10 +184,12 @@ Output Schema Required:
 }}
 
 Scoring Logic (deal_score):
-- If the item is absolutely free, score it 100.
+- If `is_buy_request` is true (the person wants to buy/acquire something), deal_score MUST be 0.
+- If the item is self-promotion, a basic free app, a personal project, or an advertisement (`self_promoter` or `self_promotion`), deal_score MUST be 0 and `is_valuable_deal` MUST be false.
+- If it is a premium digital service (normally paid) that is currently free or massively discounted, score it very high (80-100).
+- If it is a physical item and is absolutely free, score it 100.
 - If the seller motivation is desperate (e.g., leaving country tomorrow), give it a very high score (80-100) if a price is mentioned.
 - If the seller motivation is commercial_dealer, score it 0.
-- If it's highly negotiable, bump the score.
 - Base the score on how much of a bargain this appears to be based on the text.
 """
     try:
@@ -215,6 +265,8 @@ def process_item(item_id, title, selftext, post_url, source_name, seen_posts):
 
 def run_reddit_scraper(seen_posts):
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    three_days_ago = time.time() - (3 * 24 * 3600)
+    
     for sub in SUBREDDITS:
         print(f"Checking r/{sub} via RSS...")
         url = f"https://www.reddit.com/r/{sub}/new.rss"
@@ -226,6 +278,12 @@ def run_reddit_scraper(seen_posts):
                 
             feed = feedparser.parse(response.content)
             for entry in feed.entries:
+                # Check Post Age (Must be less than 3 days old)
+                if hasattr(entry, 'published_parsed'):
+                    post_timestamp = calendar.timegm(entry.published_parsed)
+                    if post_timestamp < three_days_ago:
+                        continue # Skip posts older than 3 days
+                
                 post_id = entry.id
                 title = entry.title
                 selftext = entry.summary if hasattr(entry, 'summary') else ''
@@ -237,49 +295,14 @@ def run_reddit_scraper(seen_posts):
             print(f"Error checking {sub}: {e}")
             time.sleep(3)
 
-def run_dubizzle_scraper(seen_posts):
-    print("Launching Headless Chrome for Dubizzle...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport={'width': 1280, 'height': 800}
-        )
-        page = context.new_page()
-        
-        for dub_url in DUBIZZLE_URLS:
-            try:
-                print(f"Checking Dubizzle: {dub_url}")
-                page.goto(dub_url, wait_until="networkidle", timeout=60000)
-                page.wait_for_timeout(3000) 
-                
-                html = page.content()
-                soup = BeautifulSoup(html, "html.parser")
-                
-                links = soup.find_all('a', href=True)
-                for link in links:
-                    href = link['href']
-                    if "/en/free-stuff/" in href and len(href) > 30:
-                        full_url = href if href.startswith("http") else "https://dubai.dubizzle.com" + href
-                        title = link.get_text(strip=True)
-                        if not title or len(title) < 5:
-                            continue
-                            
-                        process_item(full_url, title, "Dubizzle Listing", full_url, "Dubizzle", seen_posts)
-            except Exception as e:
-                print(f"Error checking Dubizzle {dub_url}: {e}")
-                
-        browser.close()
-
 def main():
-    print("Starting Deal Tracker Bot (RSS + Dubizzle Headless Mode)...")
-    git_pull_memory()
+    print("Starting Deal Tracker Bot (Reddit Only)...")
+    api_pull_memory()
     
     seen_posts = load_seen_posts()
     run_reddit_scraper(seen_posts)
-    run_dubizzle_scraper(seen_posts)
     
-    git_push_memory()
+    api_push_memory()
             
 if __name__ == "__main__":
     main()
