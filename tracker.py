@@ -7,8 +7,11 @@ import feedparser
 import subprocess
 import calendar
 import base64
+import urllib3
 from dotenv import load_dotenv
 from groq import Groq
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
@@ -57,7 +60,7 @@ def api_pull_memory():
     }
     try:
         print("Pulling latest memory from GitHub API...")
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, verify=False)
         if response.status_code == 200:
             data = response.json()
             GITHUB_FILE_SHA = data['sha']
@@ -90,6 +93,13 @@ def api_push_memory():
     
     try:
         print("Pushing memory to GitHub API...")
+        
+        # Get the latest SHA first to prevent 422 errors
+        get_response = requests.get(url, headers=headers, verify=False)
+        sha = None
+        if get_response.status_code == 200:
+            sha = get_response.json().get('sha')
+            
         with open(SEEN_POSTS_FILE, 'r') as f:
             content = f.read()
             
@@ -100,10 +110,10 @@ def api_push_memory():
             "content": encoded_content
         }
         
-        if GITHUB_FILE_SHA:
-            payload["sha"] = GITHUB_FILE_SHA
+        if sha:
+            payload["sha"] = sha
             
-        response = requests.put(url, headers=headers, json=payload)
+        response = requests.put(url, headers=headers, json=payload, verify=False)
         
         if response.status_code in [200, 201]:
             print("Successfully pushed memory to GitHub.")
@@ -200,7 +210,7 @@ Scoring Logic (deal_score):
                     "content": prompt,
                 }
             ],
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             temperature=0.1,
             max_tokens=500
         )
