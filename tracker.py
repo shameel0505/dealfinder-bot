@@ -210,11 +210,15 @@ Scoring Logic (deal_score):
                     "content": prompt,
                 }
             ],
-            model="llama-3.3-70b-versatile",
+            model="qwen/qwen3.6-27b",
             temperature=0.1,
-            max_tokens=500
+            max_tokens=2000
         )
         response_text = chat_completion.choices[0].message.content.strip()
+        
+        # Remove reasoning block if Qwen adds it
+        import re
+        response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
         
         if response_text.startswith("```json"):
             response_text = response_text[7:]
@@ -227,6 +231,10 @@ Scoring Logic (deal_score):
         return result
     except Exception as e:
         print(f"Error during Groq API call or JSON parsing: {e}")
+        try:
+            print(f"Response text was: {repr(response_text)}")
+        except:
+            pass
         return None
 
 def process_item(item_id, title, selftext, post_url, source_name, seen_posts):
